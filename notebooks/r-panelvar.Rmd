@@ -1,0 +1,472 @@
+---
+title: "Wine Imports to U.S."
+author: "Henry Johnson"
+date: "3/1/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# wd <- "/Users/henryjohnson/Documents/school/thesis/the-effects-of-tariffs-on-wine-prices"
+
+# setwd(wd)
+library(foreign)
+library(ggplot2)
+library(estimatr)
+library(car)
+library(stats)
+library(corrplot)
+library(readxl)
+library(stringr)
+library(dplyr)
+library(forecast)
+library(panelvar)
+library(tseries)
+library(plm)
+library(utils)
+```
+
+## Import data
+
+```{r import-data}
+test_for_r <- read_excel("~/Documents/school/Thesis/the-effect-of-tariffs-on-wine-prices/data/test_for_r.xlsx", 
+     col_types = c("skip", "text", "date", 
+         "numeric", "numeric", "numeric", 
+         "numeric", "numeric", "numeric", 
+         "skip", "numeric", "numeric", "numeric", 
+         "numeric", "numeric", "numeric", 
+         "numeric", "numeric"))
+```
+
+## Rename Columns
+
+```{r rename-columns, echo=FALSE}
+df <- test_for_r
+names(df)[3] <- 'cif'
+names(df)[4] <- 'duties'
+names(df)[5] <- 'duty_val'
+names(df)[6] <- 'duty_paid'
+names(df)[7] <- 'quantity_imp'
+names(df)[8] <- 'value_imp'
+names(df)[9] <- 'ppi'
+```
+
+
+## Adjust for Inflation
+```{r adjust-inflation}
+df$cif_adj <- df$cif / df$ppi * 100
+df$duties_adj <- df$duties / df$ppi * 100
+df$duty_val_adj <- df$duty_val / df$ppi * 100
+df$duty_paid_adj <- df$duty_paid / df$ppi * 100
+df$value_imp_adj <- df$value_imp / df$ppi * 100
+```
+
+
+```{r create-synthetic-variables}
+df$duty_rate <- ifelse(df$duty_val==0, 0, df$duties / df$duty_val)
+df$imp_pc <- df$quantity_imp / df$population
+df$bottled_pc <- df$bottled / df$population
+df$cif_rate <- ifelse(df$quantity_imp==0, 0, df$cif_adj / df$quantity_imp)
+
+# create proportion of imports column
+df1 = subset(df, select=c("Country", "month", "quantity_imp"))
+df1 <- df1[(df1$Country=="Victims"),]
+df1 <- df1 %>% distinct()
+df2 = subset(df, select=c("Country", "month", "quantity_imp"))
+df2 <- df2[(df2$Country=="World"),]
+df2 <- df2 %>% distinct()
+df3 = subset(df, select=c("month"))
+df3 <- df3 %>% distinct()
+df3$prop_imp <- df1$quantity_imp / (df2$quantity_imp - df1$quantity_imp)
+# merge proportions back in
+df <- left_join(df, df3, by="month")
+
+rm(df1)
+rm(df2)
+rm(df3)
+```
+
+## Stationary Corrections
+
+First, I'll test for stationarity using ADF test and then diff the data to increase stationarity.
+
+```{r stationarity}
+# duty rate isn't stationary by itself for a couple of countries
+for (c in unique(df$Country)) {
+  test_data <- df[(df$Country==c),]
+  test_data = subset(test_data, select=c("month", "duty_rate"))
+  test_data <- test_data %>% distinct()
+  print(c)
+  print(adf.test(na.omit(test_data$duty_rate)))
+}
+# duty rate isn't stationary by itself for a couple of countries. Taking the first diff works.
+df <- transform(df, duty_r_d1 = ave(duty_rate, Country, FUN = function(x) c(NA, diff(x))))
+for (c in unique(df$Country)) {
+  test_data <- df[(df$Country==c),]
+  test_data = subset(test_data, select=c("month", "duty_r_d1"))
+  test_data <- test_data %>% distinct()
+  print(c)
+  print(adf.test(na.omit(test_data$duty_r_d1)))
+}
+
+# cif rate isn't stationary by itself for a couple of countries
+for (c in unique(df$Country)) {
+  test_data <- df[(df$Country==c),]
+  test_data = subset(test_data, select=c("month", "cif_rate"))
+  test_data <- test_data %>% distinct()
+  print(c)
+  print(adf.test(na.omit(test_data$cif_rate)))
+}
+# taking the first diff works
+df <- transform(df, cif_r_d1 = ave(cif_rate, Country, FUN = function(x) c(NA, diff(x))))
+for (c in unique(df$Country)) {
+  test_data <- df[(df$Country==c),]
+  test_data = subset(test_data, select=c("month", "cif_r_d1"))
+  test_data <- test_data %>% distinct()
+  print(c)
+  print(adf.test(na.omit(test_data$cif_r_d1)))
+}
+
+# values for bottled wine are stationary
+test_data = subset(df, select=c("month", "bottled", "bottled_pc"))
+test_data <- test_data %>% distinct()
+adf.test(na.omit(test_data$bottled))
+adf.test(na.omit(test_data$bottled_pc))
+
+# price isn't stationary
+test_data = subset(df, select=c("month", "price_adj"))
+test_data <- test_data %>% distinct()
+adf.test(na.omit(test_data$price_adj))
+# first diff fixes that
+price_diff <- diff(test_data$price_adj, lag=1, differences=1)
+adf.test(na.omit(price_diff))
+# merge it back to main df
+price_diff <- c(NA, price_diff)
+test_data$price_d1 <- price_diff
+test_data <- subset(test_data, select=c("month", "price_d1"))
+df <- left_join(df, test_data, by="month")
+
+# export quantity isn't stationary by itself
+test_data = subset(df, select=c("month", "quantity_exports"))
+test_data <- test_data %>% distinct()
+adf.test(na.omit(test_data$quantity_exports))
+# first diff fixes that
+exp_q_diff <- diff(test_data$quantity_exports, lag=1, differences=1)
+adf.test(na.omit(exp_q_diff))
+exp_q_diff <- c(NA, exp_q_diff)
+test_data$exp_q_d1 <- exp_q_diff
+test_data <- subset(test_data, select=c("month", "exp_q_d1"))
+df <- left_join(df, test_data, by="month")
+
+# proportion of imports is stationary by itself
+test_data = subset(df, select=c("month", "prop_imp"))
+test_data <- test_data %>% distinct()
+adf.test(na.omit(test_data$prop_imp))
+
+# quantity of imports isn't stationary since many countries aren't stationary
+for (c in unique(df$Country)) {
+  test_data <- df[(df$Country==c),]
+  test_data = subset(test_data, select=c("month", "quantity_imp"))
+  test_data <- test_data %>% distinct()
+  print(c)
+  print(adf.test(na.omit(test_data$quantity_imp)))
+}
+# taking the first diff works
+df <- transform(df, imp_q_d1 = ave(quantity_imp, Country, FUN = function(x) c(NA, diff(x))))
+for (c in unique(df$Country)) {
+  test_data <- df[(df$Country==c),]
+  test_data = subset(test_data, select=c("month", "imp_q_d1"))
+  test_data <- test_data %>% distinct()
+  print(c)
+  print(adf.test(na.omit(test_data$imp_q_d1)))
+}
+```
+
+## Correct for seasonality
+
+```{r seasonality-imp-q-d1}
+# Column: imp_q_d1
+i=0
+for (c in unique(df$Country)) {
+  if (i == 0) {
+    temp_df <- df[df$Country == c, ]
+
+    df_diff_seas_quant_imp <- temp_df$imp_q_d1 %>%
+      mstl()
+    
+    temp_ts <- ts(df_diff_seas_quant_imp, start=c(2000, 1), end=c(2021, 12), frequency=12)
+    seas_adj <- seasadj(decompose(temp_ts, "multiplicative"))
+    temp_df$imp_q_sa <- seas_adj[,1]
+    temp_df = subset(temp_df, select=c("month", "Country", "imp_q_sa"))
+    seas_adj_df <- left_join(df, temp_df, by = c("month", "Country"))
+    seas_adj_df = seas_adj_df[, !(names(seas_adj_df) %in% c("imp_q_sa_2"))]
+  }
+  else {
+    temp_df <- df[df$Country == c, ]
+    
+    df_diff_seas_quant_imp <- temp_df$imp_q_d1 %>%
+      mstl()
+
+    temp_ts <- ts(df_diff_seas_quant_imp, start=c(2000, 1), end=c(2021, 12), frequency=12)
+    seas_adj <- seasadj(decompose(temp_ts, "multiplicative"))
+    temp_df$imp_q_sa_2 <- seas_adj[,1]
+    temp_df = subset(temp_df, select=c("month", "Country", "imp_q_sa_2"))
+    seas_adj_df <- left_join(seas_adj_df, temp_df, by = c("month", "Country"))
+
+    seas_adj_df$imp_q_sa <- coalesce(seas_adj_df$imp_q_sa, seas_adj_df$imp_q_sa_2)
+    seas_adj_df = seas_adj_df[, !(names(seas_adj_df) %in% c("imp_q_sa_2"))]
+  }
+  i = i+1
+}
+```
+
+```{r seasonality-cif-r-d1}
+# Column: cif_r_d1
+i=0
+for (c in unique(df$Country)) {
+  if (i == 0) {
+    temp_df <- seas_adj_df[seas_adj_df$Country == c, ]
+
+    df_diff_seas_quant_imp <- temp_df$cif_r_d1 %>%
+      mstl()
+    
+    temp_ts <- ts(df_diff_seas_quant_imp, start=c(2000, 1), end=c(2021, 12), frequency=12)
+    seas_adj <- seasadj(decompose(temp_ts, "multiplicative"))
+    temp_df$cif_r_sa <- seas_adj[,1]
+    temp_df = subset(temp_df, select=c("month", "Country", "cif_r_sa"))
+    seas_adj_df <- left_join(seas_adj_df, temp_df, by = c("month", "Country"))
+    seas_adj_df = seas_adj_df[, !(names(seas_adj_df) %in% c("cif_r_sa_2"))]
+  }
+  else {
+    temp_df <- seas_adj_df[seas_adj_df$Country == c, ]
+    
+    df_diff_seas_quant_imp <- temp_df$cif_r_d1 %>%
+      mstl()
+
+    temp_ts <- ts(df_diff_seas_quant_imp, start=c(2000, 1), end=c(2021, 12), frequency=12)
+    seas_adj <- seasadj(decompose(temp_ts, "multiplicative"))
+    temp_df$cif_r_sa_2 <- seas_adj[,1]
+    temp_df = subset(temp_df, select=c("month", "Country", "cif_r_sa_2"))
+    seas_adj_df <- left_join(seas_adj_df, temp_df, by = c("month", "Country"))
+
+    seas_adj_df$cif_r_sa <- coalesce(seas_adj_df$cif_r_sa, seas_adj_df$cif_r_sa_2)
+    seas_adj_df = seas_adj_df[, !(names(seas_adj_df) %in% c("cif_r_sa_2"))]
+  }
+  i = i+1
+}
+```
+
+```{r seasonality-duty-r-d1}
+# Column: duty_r_d1
+i=0
+for (c in unique(df$Country)) {
+  if (i == 0) {
+    temp_df <- seas_adj_df[seas_adj_df$Country == c, ]
+
+    df_diff_seas_quant_imp <- temp_df$duty_r_d1 %>%
+      mstl()
+    
+    temp_ts <- ts(df_diff_seas_quant_imp, start=c(2000, 1), end=c(2021, 12), frequency=12)
+    seas_adj <- seasadj(decompose(temp_ts, "additive"))
+    temp_df$duty_r_sa <- seas_adj[,1]
+    temp_df = subset(temp_df, select=c("month", "Country", "duty_r_sa"))
+    seas_adj_df <- left_join(seas_adj_df, temp_df, by = c("month", "Country"))
+    seas_adj_df = seas_adj_df[, !(names(seas_adj_df) %in% c("duty_r_sa_2"))]
+  }
+  else {
+    temp_df <- df[df$Country == c, ]
+    
+    df_diff_seas_quant_imp <- temp_df$duty_r_d1 %>%
+      mstl()
+
+    temp_ts <- ts(df_diff_seas_quant_imp, start=c(2000, 1), end=c(2021, 12), frequency=12)
+    seas_adj <- seasadj(decompose(temp_ts, "additive"))
+    temp_df$duty_r_sa_2 <- seas_adj[,1]
+    temp_df = subset(temp_df, select=c("month", "Country", "duty_r_sa_2"))
+    seas_adj_df <- left_join(seas_adj_df, temp_df, by = c("month", "Country"))
+
+    seas_adj_df$duty_r_sa <- coalesce(seas_adj_df$duty_r_sa, seas_adj_df$duty_r_sa_2)
+    seas_adj_df = seas_adj_df[, !(names(seas_adj_df) %in% c("duty_r_sa_2"))]
+  }
+  i = i+1
+}
+```
+
+```{r seasonality-exp-q-d1}
+# Column: exp_q_d1
+temp_df = subset(seas_adj_df, select=c("month", "exp_q_d1"))
+temp_df <- temp_df %>% distinct()
+
+df_diff_seas_exp_q_d1 <- temp_df$exp_q_d1 %>%
+  mstl()
+
+temp_ts <- ts(df_diff_seas_exp_q_d1, start=c(2000, 1), end=c(2021, 12), frequency=12)
+temp_df$exp_q_sa <- seasadj(decompose(temp_ts, "multiplicative"))[,1]
+temp_df = subset(temp_df, select=c("month", "exp_q_sa"))
+
+seas_adj_df <- left_join(seas_adj_df, temp_df, by = c("month"))
+```
+
+```{r seasonality-price-d1}
+# Column: price_d1
+temp_df = subset(seas_adj_df, select=c("month", "price_d1"))
+temp_df <- temp_df %>% distinct()
+
+df_diff_seas_price_adj_d1 <- temp_df$price_d1 %>%
+  mstl()
+
+temp_ts <- ts(df_diff_seas_price_adj_d1, start=c(2000, 1), end=c(2021, 12), frequency=12)
+temp_df$price_sa <- seasadj(decompose(temp_ts, "multiplicative"))[,1]
+# temp_df$price_sa <- seasadj(df_diff_seas_price_adj_d1)
+temp_df = subset(temp_df, select=c("month", "price_sa"))
+
+seas_adj_df <- left_join(seas_adj_df, temp_df, by = c("month"))
+```
+
+```{r seasonality-bottled-pc}
+# Column: bottled_d1
+temp_df = subset(seas_adj_df, select=c("month", "bottled_pc"))
+temp_df <- temp_df %>% distinct()
+
+df_diff_bottled_pc_d1 <- temp_df$bottled_pc %>%
+  mstl()
+
+temp_ts <- ts(df_diff_bottled_pc_d1, start=c(2000, 1), end=c(2021, 12), frequency=12)
+temp_df$bottled_pc_sa <- seasadj(decompose(temp_ts, "multiplicative"))[,1]
+# temp_df$bottled_pc_sa <- seasadj(df_diff_bottled_pc_d1)
+temp_df = subset(temp_df, select=c("month", "bottled_pc_sa"))
+
+seas_adj_df <- left_join(seas_adj_df, temp_df, by = c("month"))
+```
+
+```{r seasonality-prop-imp}
+# Column: prop_imp
+temp_df = subset(seas_adj_df, select=c("month", "prop_imp"))
+temp_df <- temp_df %>% distinct()
+
+df_diff_prop_imp_d1 <- temp_df$prop_imp %>%
+  mstl()
+
+temp_ts <- ts(df_diff_prop_imp_d1, start=c(2000, 1), end=c(2021, 12), frequency=12)
+temp_df$prop_imp_sa <- seasadj(decompose(temp_ts, "multiplicative"))[,1]
+# temp_df$prop_imp_sa <- seasadj(df_diff_prop_imp_d1)
+temp_df = subset(temp_df, select=c("month", "prop_imp_sa"))
+
+seas_adj_df <- left_join(seas_adj_df, temp_df, by = c("month"))
+seas_adj_df <- as.data.frame(seas_adj_df)
+
+```
+
+```{r cleanup-columns}
+# seas_adj_df <- seas_adj_df[ , -which(names(seas_adj_df) %in% c("bottled_pc_sa.y","price_sa.y", "exp_q_sa.y"))]
+# 
+# seas_adj_df <- seas_adj_df %>%
+#   rename(
+#     bottled_pc_sa = bottled_pc_sa.x,
+#     price_sa = price_sa.x,
+#     exp_q_sa = exp_q_sa.x
+#   )
+# 
+# seas_adj_df$price_sa
+```
+
+# Now let's do a panel VAR
+
+```{r model-var}
+model_df = subset(seas_adj_df, select=c("Country", "month", "price_d1", "bottled_pc_sa", "imp_q_sa", "duty_rate", "exp_q_sa", "frspger_25", "prop_imp_sa", "cif_r_sa"))
+
+time_df <- model_df
+time_df <- subset(time_df, select=c("month"))
+time_df <- time_df %>% distinct()
+seq <- seq(1, 261, by=1)
+time_df$time_seq <- seq
+
+model_df2 <- na.omit(model_df)
+
+colnames(model_df2)
+model_df2$Country = as.factor(model_df2$Country)
+
+seas_adj_df$id <- as.integer(factor(seas_adj_df$Country, 
+                  levels=unique(seas_adj_df$Country)))
+model_df2$tariff <- as.logical(model_df2$frspger_25)
+model_df2$time <- as.integer(model_df2$month)
+
+model_df2$price_sa = as.numeric(model_df2$price_sa)
+model_df2$bottled_pc_sa = as.numeric(model_df2$bottled_pc_sa)
+model_df2$imp_q_sa = as.numeric(model_df2$imp_q_sa)
+model_df2$exp_q_sa = as.numeric(model_df2$exp_q_sa)
+model_df2$cif_r_sa = as.numeric(model_df2$cif_r_sa)
+
+model_df3 <- model_df2[!(model_df2$Country=="World" | model_df2$Country=="Victims"),]
+
+model_df2 <- left_join(model_df2, time_df, by="month")
+
+# class(model_df2)
+# names(model_df2)
+model_df2 <- as.data.frame(model_df2)
+
+```
+
+Let's check to see if we might any multicollinearity issues by doing a corr plot
+```{r corr-plots}
+
+for (c in unique(model_df2$Country)) {
+  temp_df <- model_df2[model_df2$Country == c, ]
+  corr_plot_df <- subset(temp_df, select=c("price_d1", "bottled_pc_sa", "imp_q_sa", "duty_rate", "exp_q_sa", "cif_r_sa", "prop_imp_sa"))
+  M <- cor(corr_plot_df)
+  corrplot(M)
+}
+
+temp_df <- df[df$Country == "Victims", ]
+corr_plot_df <- subset(temp_df, select=c("price_d1", "bottled_pc_sa", "imp_q_sa", "duty_r_d1", "exp_q_sa", "cif_r_sa", "prop_imp_sa"))
+M <- cor(corr_plot_df)
+corrplot(M)
+```
+
+There doesn't seem to be any correlation between duty rates and prices here. WTAF.
+
+```{r fit-model}
+
+# The dataframe becomes singular if we include all of the panels
+model_df3 <- seas_adj_df[(model_df2$Country=="Victims" | model_df2$Country=="Argentina" |  model_df2$Country=="Chile" | model_df2$Country=="Italy" ),]
+
+model_df3 <- as.data.frame(model_df3)
+
+var_mod <-
+  pvarfeols(
+    dependent_vars = c("price_sa", "duty_r_sa", "exp_q_sa", "prop_imp_sa", "bottled_pc_sa"),
+    lags = 1,
+    exog_vars = c("cif_r_sa"),
+    transformation = "demean",
+    data = na.omit(model_df3),
+    panel_identifier= c("Country", "month"))
+summary(var_mod)
+
+
+# fails due to singularity issue
+model_df4 <- seas_adj_df[!(model_df2$Country=="Victims" | model_df2$Country=="World"),]
+
+var_mod <-
+  pvarfeols(
+    dependent_vars = c("price_sa", "duty_r_sa", "exp_q_sa", "prop_imp_sa", "bottled_pc_sa"),
+    lags = 1,
+    exog_vars = c("cif_r_sa"),
+    transformation = "demean",
+    data = na.omit(model_df4),
+    panel_identifier= c("Country", "month"))
+summary(var_mod)
+
+```
+
+
+```{r irf}
+library("MTS")
+varx_irf <- VARXirf(var_mod, lag=12, orth=TRUE)
+
+girf(var_mod, n.ahead=3, ma_approx_steps=3)
+```
+
+
