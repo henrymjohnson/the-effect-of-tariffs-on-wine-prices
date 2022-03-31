@@ -4,7 +4,6 @@ import numpy as np
 class VARX:
     def __init__(self, df, endog, exog, lag, x_lag):
         df = self.df
-        data = self.build_lagged_data(df)
         endog = self.endog
         exog = self.exog
         lag = self.lag
@@ -35,14 +34,31 @@ class VARX:
 
         if include_mean:
             xmtx = np.ones(n_t - ist + 1)
+
+        # let's define the columns so that we can keep track of which values are for which columns
+        cols = self.endog
+        cols_exog = self.exog
         
-        # add in the lags
+        # add in the lags for endog variables
         if p > 0:
             for i in range(p):
-                xmtx = xmtx.hstack(y[(ist-i):(n_t-i),])
+                xmtx = np.concatenate((xmtx, y[(ist-i-1):(n_t-i-1),]), axis=1)
+                if i > 0:
+                    new_cols = [c + '_l' + str(i) for c in self.endog]
+                    # update list of column names
+                    cols = np.concatenate([new_cols, cols])
+        # add in the lags for exog variables
         if m > -1:
-            for i in range(m):
-                xmtx = xmtx.hstack(x[(ist-i):(n_t-i),])
+            for i in range(m+1):
+                xmtx = np.concatenate((xmtx, x[(ist-i):(n_t-i),]), axis=1)
+                # update exog column names
+                if i > 0:
+                    new_cols_exog = [c + '_l' + str(i) for c in self.exog]
+                    cols_exog = np.concatenate([new_cols_exog, cols_exog])
+
+        # update entire set of columns
+        cols = np.concatenate([cols, cols_exog])
+        cols = np.concatenate([['intercept'], cols])
 
         p_1 = xmtx.shape[1]
         nobe = xmtx.shape[0]
@@ -51,8 +67,6 @@ class VARX:
         se_beta = np.ones((p_1, k))
         resi = y_t
         n_par = 0
-
-        fixed = np.NaN
 
         if (np.isnan(fixed)):
             xpx = np.dot(xmtx.T, xmtx)
@@ -162,11 +176,13 @@ class VARX:
         return y_pred
 
     
+    def irf(self):
+        print('')
+
+    
     def separate_endog_and_exog(self):
-        endog_data = self.data[self.endog]
-        exog_data = self.data[self.exog]
-        # add intercept
-        exog_data.insert(0, 'intercept', 1)
+        endog_data = self.df[self.endog]
+        exog_data = self.df[self.exog]
 
         # convert dfs to matrices
         x = exog_data.to_numpy()
