@@ -10,7 +10,7 @@ class VARX:
         x_lag = self.x_lag
 
     
-    def fit(self, include_mean=True, fixed=np.NaN, output=True):
+    def fit(self, include_mean=True, fixed=np.NaN):
         x, y = self.separate_endog_and_exog(self.df)
         p = self.lag
         m = self.x_lag
@@ -166,14 +166,72 @@ class VARX:
         self.beta_exog = beta_exog
         self.ph0 = ph0
         self.phi = phi
+        self.x = x
+        self.y = y
+        self.ran_fit = True
 
-        return beta, se_beta, resi, sig, beta_exog, ph0, phi
+        return y, x, beta, se_beta, resi, sig, beta_exog, ph0, phi
 
     
-    def transform(self):
-        y_pred = []
+    def transform(self, step, new_x=np.NaN, origin=0):
+        if (np.isnan(self.ran_fit)):
+            print('You need to fit the model')
+            return
 
-        return y_pred
+        y = self.y
+        x = self.x
+        n_t = self.y.shape[0]
+        k = self.y.shape[1]
+        dim_x = self.x.shape[1]
+        se = np.NaN
+        ph0 = self.ph0.reshape((3, 1))
+
+        if (len(ph0) < 1):
+            ph0 = np.zeros(k, 1)
+        if (step < 1):
+            step = 1
+        if (origin < 1):
+            origin = n_t
+        
+        if (~np.isNaN(new_x)):
+            # estimate values
+            step = np.min([new_x.shape[0], step])
+            y_new = self.y[0:(origin)]
+            if (dim_x > 1):
+                x = np.concatenate((self.x[0:(origin)], new_x), axis=0)
+
+            for i in range(step):
+                t_p = ph0
+                t_i = origin + i
+                for i in range(1, self.lag):
+                    id_x = (i-1) * self.lag
+                    t_p = t_p + np.dot(self.phi[:, (id_x+1):(id_x+k)], y_new[t_i - i, :].reshape(dim_x, 1))
+                if (self.x_lag > -1):
+                    for i in range(self.x_lag):
+                        id_x = i * dim_x
+                        t_p = t_p + np.dot(self.beta[:, (id_x+1):(id_x+dim_x)], x[t_i - i, :].reshape(dim_x, 1))
+                y_new = np.concatenate((y_new, t_p), axis=0)
+
+            # standard errors of predictions
+            weights = self.psi_weights(self.phi, step)
+            se = np.diag(self.sig)**(1/2)
+            se = se.reshape(1, k)
+            if step > 1:
+                for i in range(2, step):
+                    id_x = (i-1) * k
+                    wk = weights[:, (id_x):(id_x+k)]
+                    si = si + np.linalg.multi_dot([wk, self.sig, wk.T])
+                    se1 = np.diag(si)**(1/2)
+                    se1 = se1.reshape(1, k)
+                    se = np.concatenate((se, se1), axis=0)
+
+            print('Prediction at Origin:', origin)
+            print('Point forecasts:')
+            print('\n'.join([' '.join(['{:.4f}'.format(item) for item in row]) for row in y_new[:, (origin+1):(origin+step)]]))
+            print('Standard errors:')
+            print('\n'.join([' '.join(['{:.4f}'.format(item) for item in row]) for row in se[0:step,:]]))
+        
+        self.pred_errors = se
 
     
     def irf(self):
@@ -189,3 +247,34 @@ class VARX:
         y = endog_data.to_numpy()
 
         return x, y
+
+
+    def psi_weights(phi, lag):
+        k = phi.shape[0]
+        m = phi.shape[1]
+        p = np.floor(m/k)
+        si = np.zeros((k, k))
+        np.fill_diagonal(si, 1)
+        if (p < 1):
+            p = 1
+        if (lag < 1):
+            lag = 1
+        
+        for i in range(1, (lag+1)):
+            if (i < (p+1)):
+                id_x = (i-1) * k
+                t_p = phi[:, (id_x):(id_x+k)]
+            else:
+                t_p = np.zeros((k, k))
+            jj = i-1
+            jp = np.minimum(jj, p).astype(int)
+            if (jp > 0):
+                for j in range(1, (jp+1)):
+                    jd_x = (j-1) * k
+                    id_x = (i-j) * k
+                    w1 = phi[:, (jd_x):(jd_x+k)]
+                    w2 = si[:, (id_x):(id_x+k)]
+                    t_p = t_p + np.dot(w1, w2)
+            si = np.concatenate((si, t_p), axis=1)
+        
+        return si
