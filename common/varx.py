@@ -1,13 +1,15 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 class VARX:
-    def __init__(self, df, endog, exog, lag, x_lag):
+    def __init__(self, df, endog, exog, lag, x_lag, cumulative_irf):
         df = self.df
         endog = self.endog
         exog = self.exog
         lag = self.lag
         x_lag = self.x_lag
+        cumulative_irf = self.cumulative_irf
 
     
     def fit(self, include_mean=True, fixed=np.NaN):
@@ -193,23 +195,23 @@ class VARX:
         if (origin < 1):
             origin = n_t
         
-        if (~np.isNaN(new_x)):
+        if (~np.isnan(new_x)):
             # estimate values
             step = np.min([new_x.shape[0], step])
-            y_new = self.y[0:(origin)]
+            y_new = y[0:origin]
             if (dim_x > 1):
-                x = np.concatenate((self.x[0:(origin)], new_x), axis=0)
+                x = np.concatenate((self.x[0:origin], new_x), axis=0)
 
             for i in range(step):
                 t_p = ph0
                 t_i = origin + i
                 for i in range(1, self.lag):
                     id_x = (i-1) * self.lag
-                    t_p = t_p + np.dot(self.phi[:, (id_x+1):(id_x+k)], y_new[t_i - i, :].reshape(dim_x, 1))
+                    t_p = t_p + np.dot(self.phi[:, (id_x+1):(id_x+k)], y_new[t_i-i, :].reshape(dim_x, 1))
                 if (self.x_lag > -1):
                     for i in range(self.x_lag):
                         id_x = i * dim_x
-                        t_p = t_p + np.dot(self.beta[:, (id_x+1):(id_x+dim_x)], x[t_i - i, :].reshape(dim_x, 1))
+                        t_p = t_p + np.dot(self.beta[:, (id_x+1):(id_x+dim_x)], x[t_i-i, :].reshape(dim_x, 1))
                 y_new = np.concatenate((y_new, t_p), axis=0)
 
             # standard errors of predictions
@@ -219,7 +221,7 @@ class VARX:
             if step > 1:
                 for i in range(2, step):
                     id_x = (i-1) * k
-                    wk = weights[:, (id_x):(id_x+k)]
+                    wk = weights[:, id_x:(id_x+k)]
                     si = si + np.linalg.multi_dot([wk, self.sig, wk.T])
                     se1 = np.diag(si)**(1/2)
                     se1 = se1.reshape(1, k)
@@ -234,8 +236,83 @@ class VARX:
         self.pred_errors = se
 
     
-    def irf(self):
-        print('')
+    def irf(self, orthog=True):
+        if (np.isnan(self.ran_fit)):
+            print('You need to fit the model')
+            return
+
+        phi = self.phi
+        beta_exog = self.beta_exog
+        p = self.lag
+        m = self.x_lag
+        x = self.x
+        kx = np.floor(beta_exog.shape[1] / (1 + m))
+        k = phi.shape[0]
+        si = np.diag(np.ones(k))
+        wk = si.reshape((1, 9))
+        awk = wk
+        acuwk = awk
+
+        if (p < 1):
+            p = 1
+        if (m < 1):
+            m=1
+
+        for i in range(1, (m+1)):
+            if (i < (p+1)):
+                id_x = (i-1) * k
+                t_p = phi[:, id_x:(id_x+k)]
+            else:
+                t_p = np.zeros((k, k))
+            jj = i-1
+            jp = np.minimum(jj, p).astype(int)
+            if (jp > 0):
+                for j in range(1, (jp+1)):
+                    jd_x = (j-1) * k
+                    id_x = (i-j) * k
+                    w1 = phi[:, jd_x:(jd_x+k)]
+                    w2 = si[:, id_x:(id_x+k)]
+                    t_p = t_p + np.dot(w1, w2)
+            si = np.concatenate((si, t_p), axis=1)
+            wk = np.concatenate((wk, t_p.reshape((1, t_p.size))), axis=1)
+            awk = awk + t_p.reshape((1, t_p.size), order='F')
+            acuwk = np.concatenate((acuwk, awk), axis=0)
+            acuwk = acuwk.T
+        
+        orsi = np.NaN
+        wk1 = np.NaN
+        awk1 = np.NaN
+        acuwk = np.NaN
+
+        if (orthog):
+            m1 = np.linalg.cholesky(self.sig)
+            p1 = m1
+            if (~np.isnan(wk1)):
+                wk1 = np.concatenate((wk1, p1), axis=1)
+            else:
+                wk1 = p1.reshape((p1.size, 1), order='F')
+            awk1 = wk1
+            acuwk1 = awk1
+            if (~np.isnan(orsi)):
+                orsi = np.concatenate((orsi, p1), axis=1)
+            else:
+                orsi = p1
+            for i in range(1, p+1):
+                id_x = i*k
+                w1 = si[:, id_x:(id_x+k)]
+                w2 = np.dot(w1, p1)
+                orsi = np.concatenate((orsi, w2), axis=1)
+                wk1 = np.concatenate((wk1, w2.reshape((w2.size, 1), order='F')), axis=1)
+                awk1 = awk1 + w2.reshape((w2.size, 1), order='F')
+                acuwk1 = np.concatenate((acuwk1, awk1), axis=1)
+        
+        if (orthog):
+            self.plot_irf(wk=wk1, acuwk=acuwk1, cumulative=self.cumulative_irf)
+        else:
+            self.plot_irf(wk=wk, acuwk=acuwk, orthog=orthog, cumulative=self.cumulative_irf)
+
+        # TODO: exogenous variables' impulse response functions
+        
 
     
     def separate_endog_and_exog(self):
@@ -263,7 +340,7 @@ class VARX:
         for i in range(1, (lag+1)):
             if (i < (p+1)):
                 id_x = (i-1) * k
-                t_p = phi[:, (id_x):(id_x+k)]
+                t_p = phi[:, id_x:(id_x+k)]
             else:
                 t_p = np.zeros((k, k))
             jj = i-1
@@ -272,9 +349,34 @@ class VARX:
                 for j in range(1, (jp+1)):
                     jd_x = (j-1) * k
                     id_x = (i-j) * k
-                    w1 = phi[:, (jd_x):(jd_x+k)]
-                    w2 = si[:, (id_x):(id_x+k)]
+                    w1 = phi[:, jd_x:(jd_x+k)]
+                    w2 = si[:, id_x:(id_x+k)]
                     t_p = t_p + np.dot(w1, w2)
             si = np.concatenate((si, t_p), axis=1)
         
         return si
+
+    
+    def plot_irf(self, wk, acuwk, orthog=True, cumulative=True):
+        td_x = np.array(range(self.lag+1))
+
+        if (~cumulative):
+            plt_data = wk
+            plt_title = 'Cumulative Impulse Responses'
+        else:
+            plt_data = acuwk
+            plt_title = 'Impulse Responses'
+
+        # plot impulse responses
+        for i in range(plt_data.shape[0]):
+            plt.subplot((plt_data.shape[0]+1), 1, (i+1))
+            x_data = plt_data[i]
+            plt.plot(td_x, x_data, 'o-')
+            plt.ylabel(str(i))
+            
+        plt.xlabel('Periods')
+        if (orthog):
+            plt_title = 'Orthogonal ' + plt_title
+        plt.title(plt_title)
+        plt.show()
+
