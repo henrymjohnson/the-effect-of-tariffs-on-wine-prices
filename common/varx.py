@@ -4,12 +4,12 @@ import matplotlib.pyplot as plt
 
 class VARX:
     def __init__(self, df, endog, exog, lag, x_lag, cumulative_irf):
-        df = self.df
-        endog = self.endog
-        exog = self.exog
-        lag = self.lag
-        x_lag = self.x_lag
-        cumulative_irf = self.cumulative_irf
+        self.df = df
+        self.endog = endog
+        self.exog = exog
+        self.lag = lag
+        self.x_lag = x_lag
+        self.cumulative_irf = cumulative_irf
 
     
     def fit(self, include_mean=True, fixed=np.NaN):
@@ -236,7 +236,7 @@ class VARX:
         self.pred_errors = se
 
     
-    def irf(self, orthog=True):
+    def irf(self, lag=12, orthog=True):
         if (np.isnan(self.ran_fit)):
             print('You need to fit the model')
             return
@@ -245,8 +245,7 @@ class VARX:
         beta_exog = self.beta_exog
         p = self.lag
         m = self.x_lag
-        x = self.x
-        kx = np.floor(beta_exog.shape[1] / (1 + m))
+        # x = self.x
         k = phi.shape[0]
         si = np.diag(np.ones(k))
         wk = si.reshape((1, 9))
@@ -258,7 +257,7 @@ class VARX:
         if (m < 1):
             m=1
 
-        for i in range(1, (m+1)):
+        for i in range(1, (lag+1)):
             if (i < (p+1)):
                 id_x = (i-1) * k
                 t_p = phi[:, id_x:(id_x+k)]
@@ -312,7 +311,38 @@ class VARX:
             self.plot_irf(wk=wk, acuwk=acuwk, orthog=orthog, cumulative=self.cumulative_irf)
 
         # TODO: exogenous variables' impulse response functions
-        
+        kx = int(np.floor(beta_exog.shape[1] / (1 + m)))
+        psi_x = beta_exog[:, 0:kx]
+        wk = psi_x.reshape((1, psi_x.size), order='F')
+        awk = wk
+        acuwk = awk
+        for i in range(1, lag+1):
+            if (i < (m+1)):
+                id_x = (i-1) * kx
+                t_p = beta_exog[:, id_x:(id_x+kx)]
+            else:
+                t_p = np.zeros((k, kx))
+            jj = i-1
+            jp = np.minimum(jj, p).astype(int)
+            if (jp > 0):
+                for j in range(1, (jp+1)):
+                    jd_x = (j-1) * k
+                    id_x = (i-j) * k
+                    w1 = phi[:, jd_x:(jd_x+k)]
+                    w2 = si[:, id_x:(id_x+kx)]
+                    t_p = t_p + np.dot(w1, w2)
+            psi_x = np.concatenate((psi_x, t_p), axis=1)
+            wk = np.concatenate((wk, t_p.reshape((1, t_p.size))), axis=1)
+            awk = awk + t_p.reshape((1, t_p.size), order='F')
+            acuwk = np.concatenate((acuwk, awk), axis=0)
+
+        if (orthog):
+            self.plot_irf(wk=wk1, acuwk=acuwk1, cumulative=self.cumulative_irf)
+        else:
+            self.plot_irf(wk=wk, acuwk=acuwk, orthog=orthog, cumulative=self.cumulative_irf)
+
+        # lastly just return the values for the irfs
+        return si, orsi, psi_x
 
     
     def separate_endog_and_exog(self):
@@ -356,7 +386,7 @@ class VARX:
         
         return si
 
-    
+
     def plot_irf(self, wk, acuwk, orthog=True, cumulative=True):
         td_x = np.array(range(self.lag+1))
 
