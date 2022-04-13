@@ -3,6 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 class VARX:
+    """
+    Class to create a vector autoregression model and the impulse response functions
+    """
     def __init__(self, df, endog, exog, lag, x_lag, cumulative_irf):
         self.df = df
         self.endog = endog
@@ -13,7 +16,7 @@ class VARX:
 
     
     def fit(self, include_mean=True, fixed=np.NaN):
-        x, y = self.separate_endog_and_exog(self.df)
+        x, y = self.separate_endog_and_exog(self)
         p = self.lag
         m = self.x_lag
 
@@ -218,6 +221,7 @@ class VARX:
             weights = self.psi_weights(self.phi, step)
             se = np.diag(self.sig)**(1/2)
             se = se.reshape(1, k)
+            si = self.sigma
             if step > 1:
                 for i in range(2, step):
                     id_x = (i-1) * k

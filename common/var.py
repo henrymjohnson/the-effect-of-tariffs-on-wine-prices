@@ -3,6 +3,7 @@ import numpy as np
 
 class vector_ar:
     def __init__(self, df, endog, exog, lag):
+        df = self.df
         data = self.build_lagged_data(df)
         endog = self.endog
         exog = self.exog
